@@ -307,39 +307,26 @@ def new_student_similarity_matrix(new_students):
         
     return similarity_matrix
 
-def group_new_students(new_students, group_size):
-    """Create groups of students, ensuring each student is used only once."""
+def group_new_students(new_students, group_size=3, max_groups=None):
+    """
+    Create groups of three students, including handling remainders.
+    """
     similarity_matrix = new_student_similarity_matrix(new_students)
     groups = []
     students_list = list(new_students)
-    matched_students = set()  # Track which students have been matched using email as unique identifier
+    matched_students = set()
     
     while len(matched_students) < len(students_list):
         # Get remaining students
         available_indices = [i for i in range(len(students_list)) 
                            if students_list[i].email not in matched_students]
         
-        if len(available_indices) < group_size:
-            # Handle remaining students by adding them to the closest compatible group
-            if available_indices:  # If we have any remaining students
-                for idx in available_indices:
-                    student = students_list[idx]
-                    if student.email not in matched_students:  # Double check not already matched
-                        # Find the best group to add this student to
-                        best_group = None
-                        best_similarity = float('-inf')
-                        for group in groups:
-                            if len(group) < group_size:
-                                avg_similarity = sum(student.similarity(other) 
-                                                  for other in group) / len(group)
-                                if avg_similarity > best_similarity:
-                                    best_similarity = avg_similarity
-                                    best_group = group
-                        if best_group is not None:
-                            best_group.append(student)
-                            matched_students.add(student.email)
+        if not available_indices:
             break
             
+        # For last group, adjust size if needed
+        current_size = min(group_size, len(available_indices))
+        
         # Find the most dissimilar student among remaining students
         available_matrix = similarity_matrix[available_indices][:, available_indices]
         relative_outlier_idx = find_farthest_outlier(
@@ -349,25 +336,22 @@ def group_new_students(new_students, group_size):
         outlier_idx = available_indices[relative_outlier_idx]
         outlier = students_list[outlier_idx]
         
-        if outlier.email in matched_students:  # Safety check
-            continue
-            
         # Initialize new group with outlier
-        best_group = [outlier]
+        current_group = [outlier]
         matched_students.add(outlier.email)
         available_indices.remove(outlier_idx)
         
         # Find the most similar remaining students for this group
-        while len(best_group) < group_size and available_indices:
+        while len(current_group) < current_size and available_indices:
             best_similarity = float('-inf')
             best_idx = None
             best_student = None
             
             for idx in available_indices:
                 student = students_list[idx]
-                if student.email not in matched_students:  # Check if student is still available
+                if student.email not in matched_students:
                     avg_similarity = sum(student.similarity(other) 
-                                      for other in best_group) / len(best_group)
+                                      for other in current_group) / len(current_group)
                     if avg_similarity > best_similarity:
                         best_similarity = avg_similarity
                         best_idx = idx
@@ -376,71 +360,93 @@ def group_new_students(new_students, group_size):
             if best_student is None:
                 break
                 
-            best_group.append(best_student)
+            current_group.append(best_student)
             matched_students.add(best_student.email)
             available_indices.remove(best_idx)
         
-        if best_group:
-            groups.append(np.array(best_group))
-    
+        if current_group:  # Add any non-empty group
+            groups.append(np.array(current_group))
+            
     return groups
 
 def assign_buddies_to_groups(groups, buddies, max_mentors_per_group=1):
-    """Assign mentors to groups, ensuring each mentor is used only once."""
-    orig_similarity_matrix = similarity_matrix_buddies_to_groups(groups, buddies)
-    assigned_buddies = set()  # Track mentor emails instead of indices
+    """
+    Assign mentors to groups with priority for complete groups and highest similarity.
+    
+    Args:
+        groups: List of mentee groups
+        buddies: List of available mentors
+        max_mentors_per_group: Maximum mentors per group (default 1)
+    
+    Returns:
+        List of tuples (group, assigned_mentors)
+    """
+    similarity_matrix = similarity_matrix_buddies_to_groups(groups, buddies)
+    assigned_buddies = set()  # Track which mentors have been assigned
     groups_to_buddies = [[] for _ in groups]
     
-    # Sort groups by size to prioritize complete groups
+    # Sort groups by size and create index mapping
     group_indices = list(range(len(groups)))
     group_indices.sort(key=lambda i: len(groups[i]), reverse=True)
     
-    # First pass - assign primary mentors to complete groups
+    # First pass - assign mentors to complete groups only
     for group_idx in group_indices:
-        if len(groups[group_idx]) < 2:  # Skip incomplete groups in first pass
+        if len(groups[group_idx]) < 2:  # Skip incomplete groups
             continue
             
-        available_buddies = [b for b in buddies if b.email not in assigned_buddies]
-        if not available_buddies:
+        if len(assigned_buddies) >= len(buddies):  # No more available mentors
             break
             
-        # Calculate similarities for available buddies
+        # Find best available buddy for this group
         best_buddy = None
         best_similarity = float('-inf')
-        for buddy in available_buddies:
+        
+        for buddy in buddies:
+            if buddy.email in assigned_buddies:
+                continue
+                
+            # Calculate total similarity between buddy and all students in group
             similarity = sum(student.similarity_to_buddy(buddy) 
                            for student in groups[group_idx])
+            
             if similarity > best_similarity:
                 best_similarity = similarity
                 best_buddy = buddy
         
+        # Assign best buddy if found
         if best_buddy:
             groups_to_buddies[group_idx].append(best_buddy)
             assigned_buddies.add(best_buddy.email)
     
-    # Second pass - assign remaining mentors to incomplete groups
-    for group_idx in group_indices:
-        if len(groups_to_buddies[group_idx]) >= max_mentors_per_group:
-            continue
+    # Second pass - if any mentors remain, assign to incomplete groups
+    if len(assigned_buddies) < len(buddies):
+        for group_idx in group_indices:
+            if len(groups_to_buddies[group_idx]) >= max_mentors_per_group:
+                continue
+                
+            if len(assigned_buddies) >= len(buddies):
+                break
+                
+            # Find best remaining buddy for this group
+            best_buddy = None
+            best_similarity = float('-inf')
             
-        available_buddies = [b for b in buddies if b.email not in assigned_buddies]
-        if not available_buddies:
-            break
+            for buddy in buddies:
+                if buddy.email in assigned_buddies:
+                    continue
+                    
+                similarity = sum(student.similarity_to_buddy(buddy) 
+                               for student in groups[group_idx])
+                
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_buddy = buddy
             
-        # Calculate similarities for available buddies
-        best_buddy = None
-        best_similarity = float('-inf')
-        for buddy in available_buddies:
-            similarity = sum(student.similarity_to_buddy(buddy) 
-                           for student in groups[group_idx])
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_buddy = buddy
-        
-        if best_buddy:
-            groups_to_buddies[group_idx].append(best_buddy)
-            assigned_buddies.add(best_buddy.email)
+            if best_buddy:
+                groups_to_buddies[group_idx].append(best_buddy)
+                assigned_buddies.add(best_buddy.email)
     
+    # Return groups paired with their assigned mentors
     return [(group, group_buddies) for group, group_buddies 
             in zip(groups, groups_to_buddies)]
 
@@ -514,14 +520,14 @@ def find_farthest_outlier(new_students, similarity_matrix):
     Returns the index of the point in the similarity matrix
     """
 
-    student_has_request = [student.match_on_gender or student.match_on_race for student in new_students]
-    students_with_requests_inds = np.argwhere(student_has_request)
-    similarity_matrix = similarity_matrix.copy()
-    print("Before ")
-    print(similarity_matrix)
-    similarity_matrix[students_with_requests_inds, :] -= 2
-    print("After ")
-    print(similarity_matrix)
+    # student_has_request = [student.match_on_gender or student.match_on_race for student in new_students]
+    # students_with_requests_inds = np.argwhere(student_has_request)
+    # similarity_matrix = similarity_matrix.copy()
+    # print("Before ")
+    # print(similarity_matrix)
+    # similarity_matrix[students_with_requests_inds, :] -= 2
+    # print("After ")
+    # print(similarity_matrix)
 
 
     # For every point, determine the similarity to the closest point
@@ -1043,6 +1049,83 @@ def evaluate_matches(new_students, buddies, groups_with_buddies):
         if buddy_timezone_diffs:
             print(f"Buddy timezone difference average: {sum(buddy_timezone_diffs)/len(buddy_timezone_diffs):.2f}")
 
+def group_new_students(new_students, group_size=3, max_groups=None):
+    """
+    Create groups of three students with a limit on total groups.
+    
+    Args:
+        new_students: Array of students to group
+        group_size: Desired size of each group (now defaults to 3)
+        max_groups: Maximum number of groups to create (e.g., number of available mentors)
+    
+    Returns:
+        List of student groups
+    """
+    similarity_matrix = new_student_similarity_matrix(new_students)
+    groups = []
+    students_list = list(new_students)
+    matched_students = set()  # Track which students have been matched using email
+    
+    # Calculate maximum possible groups
+    max_possible_groups = len(students_list) // group_size
+    if max_groups is not None:
+        max_possible_groups = min(max_possible_groups, max_groups)
+        
+    while len(groups) < max_possible_groups and len(matched_students) < len(students_list):
+        # Get remaining students
+        available_indices = [i for i in range(len(students_list)) 
+                           if students_list[i].email not in matched_students]
+        
+        if len(available_indices) < group_size:
+            break
+            
+        # Find the most dissimilar student among remaining students
+        available_matrix = similarity_matrix[available_indices][:, available_indices]
+        relative_outlier_idx = find_farthest_outlier(
+            [students_list[i] for i in available_indices], 
+            available_matrix
+        )
+        outlier_idx = available_indices[relative_outlier_idx]
+        outlier = students_list[outlier_idx]
+        
+        if outlier.email in matched_students:
+            continue
+            
+        # Initialize new group with outlier
+        current_group = [outlier]
+        matched_students.add(outlier.email)
+        available_indices.remove(outlier_idx)
+        
+        # Find the most similar remaining students for this group
+        while len(current_group) < group_size and available_indices:
+            best_similarity = float('-inf')
+            best_idx = None
+            best_student = None
+            
+            for idx in available_indices:
+                student = students_list[idx]
+                if student.email not in matched_students:
+                    # Calculate average similarity with all current group members
+                    avg_similarity = sum(student.similarity(other) 
+                                      for other in current_group) / len(current_group)
+                    if avg_similarity > best_similarity:
+                        best_similarity = avg_similarity
+                        best_idx = idx
+                        best_student = student
+            
+            if best_student is None:
+                break
+                
+            current_group.append(best_student)
+            matched_students.add(best_student.email)
+            available_indices.remove(best_idx)
+        
+        # Add group if it's complete or we're at the end
+        if len(current_group) == group_size or (len(groups) == max_possible_groups - 1):
+            groups.append(np.array(current_group))
+            
+    return groups
+
 def print_group_statistics(mentees, mentors, groups_with_mentors):
     """Print detailed statistics about group matches."""
     # Count students in various group types
@@ -1197,44 +1280,177 @@ def verify_matches(csv_file):
 
     return duplicate_students, duplicate_mentors, student_groups, mentor_groups
 
+def debug_student_counts(mentees, groups, unmatched_students):
+    """Print detailed breakdown of student numbers"""
+    print("\nStudent Count Analysis:")
+    print(f"Total mentees in input data: {len(mentees)}")
+    
+    # Count students in groups
+    students_in_groups = 0
+    for group in groups:
+        students_in_groups += len(group)
+        print(f"Group size: {len(group)}")
+    
+    print(f"\nTotal students in groups: {students_in_groups}")
+    print(f"Number of groups: {len(groups)}")
+    print(f"Number of unmatched students: {len(unmatched_students)}")
+    print(f"Total accounted for: {students_in_groups + len(unmatched_students)}")
+    
+    # Check for duplicates
+    all_emails = set()
+    duplicate_emails = set()
+    for group in groups:
+        for student in group:
+            if student.email in all_emails:
+                duplicate_emails.add(student.email)
+            all_emails.add(student.email)
+    
+    if duplicate_emails:
+        print("\nFound duplicate student assignments:")
+        for email in duplicate_emails:
+            print(f"- {email}")
+
+def debug_student_counts(mentees, groups, unmatched_students):
+    """Print detailed breakdown of student numbers and group compositions"""
+    print("\nStudent Count Analysis:")
+    print(f"Total mentees in input data: {len(mentees)}")
+    
+    # Print all students from input
+    print("\nInput Students:")
+    for student in mentees:
+        print(f"- {student.name} ({student.email})")
+    
+    print("\nGroup Compositions:")
+    # Count and show students in groups
+    students_in_groups = set()
+    for i, group in enumerate(groups):
+        print(f"\nGroup {i+1} (size: {len(group)}):")
+        for student in group:
+            print(f"- {student.name} ({student.email})")
+            students_in_groups.add(student.email)
+    
+    print(f"\nTotal unique students in groups: {len(students_in_groups)}")
+    print(f"Number of groups: {len(groups)}")
+    
+    # Find students not in any group
+    all_emails = {student.email for student in mentees}
+    unassigned_emails = all_emails - students_in_groups
+    
+    print("\nStudents not in any group:")
+    for email in unassigned_emails:
+        student = next(s for s in mentees if s.email == email)
+        print(f"- {student.name} ({student.email})")
+    
+    print(f"\nTotal students accounted for in groups: {len(students_in_groups)}")
+    print(f"Total unassigned students: {len(unassigned_emails)}")
+    print(f"Sum should equal total mentees ({len(mentees)}): {len(students_in_groups) + len(unassigned_emails)}")
+
 
 if __name__ == "__main__":
-    mentees, mentors = generate_mentors_and_mentees_from_survey_responses("cs_mentorship_2024_responses.csv")
-    print(f"Loaded {len(mentees)} mentees and {len(mentors)} mentors")
+    # Load mentees and mentors
+    mentees_raw, mentors = generate_mentors_and_mentees_from_survey_responses("cs_mentorship_2024_responses.csv")
+
+    all_emails = set()
+
+    for mentee in mentees_raw:
+        all_emails.add(mentee.email)
+
+    for mentor in mentors:
+        all_emails.add(mentor.email)    
+
+    with open('unique_emails.csv', 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Email'])  # Header
+        for email in sorted(all_emails):  # Sort alphabetically
+            writer.writerow([email])
+
+    print(f"\nEmail Summary:")
+    print(f"Total unique emails: {len(all_emails)}")
+    print("Saved to 'unique_emails.csv'")
     
-    # Create groups of 2 mentees
-    groups = group_new_students(mentees, 2)
+    # Deduplicate mentees based on email
+    unique_mentees = {}
+    duplicates = set()
+    for mentee in mentees_raw:
+        if mentee.email in unique_mentees:
+            duplicates.add(mentee.email)
+        unique_mentees[mentee.email] = mentee
+    
+    mentees = list(unique_mentees.values())
+    
+    print(f"\nDeduplication Summary:")
+    print(f"Original mentees: {len(mentees_raw)}")
+    print(f"Unique mentees: {len(mentees)}")
+    print("\nDuplicate entries found for:")
+    for email in duplicates:
+        print(f"- {unique_mentees[email].name} ({email})")
+    
+    print(f"\nLoaded {len(mentees)} unique mentees and {len(mentors)} mentors")
+    
+    # Create groups of 3 mentees
+    groups = group_new_students(mentees, group_size=3)
     print(f"Created {len(groups)} mentee groups")
     
+    # Track which students got matched
+    matched_students = set()
+    for group in groups:
+        for student in group:
+            matched_students.add(student.email)
+    
+    # Find unmatched students
+    unmatched_students = [student for student in mentees if student.email not in matched_students]
+    
+    # Detailed debug output
+    debug_student_counts(mentees, groups, unmatched_students)
+    
+    
     # Assign mentors to groups
-    groups_with_mentors = assign_buddies_to_groups(groups, mentors)
-    print(f"Assigned mentors to {len(groups_with_mentors)} groups")
+    groups_with_mentors = assign_buddies_to_groups(groups, mentors, max_mentors_per_group=1)
     
-    # Evaluate matches
-    evaluate_matches(mentees, mentors, groups_with_mentors)
+    # Print unmatched student details
+    print("\nUnmatched Students:")
+    print(f"Total unmatched: {len(unmatched_students)}")
+    for student in unmatched_students:
+        print(f"- {student.name} ({student.email})")
+        print(f"  School: {student.school}")
+        print(f"  CS Status: {student.cs_status}")
+        print(f"  Year: {student.year}")
+        print(f"  CS Experience Level: {student.cs_experience}")
     
-    # Analyze matches and create visualizations
-    unmatched_mentees, unmatched_mentors = analyze_matches(mentees, mentors, groups_with_mentors)
-
-    print_group_statistics(mentees, mentors, groups_with_mentors)
-
-    duplicates, dup_mentors, students, mentors = verify_matches('mentor_matches.csv')
-    if duplicates or dup_mentors:
-        print("\nWARNING: Found duplicate assignments!")
-        print("Please check the matching algorithm for bugs.")
-    
-    # Save matches to CSV
+    # Save matches to CSV with clear marking of mentor status
     with open('mentor_matches.csv', 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(['Group', 'Role', 'Name', 'Email', 'Year', 'School'])
         
-        for i, (group, mentors) in enumerate(groups_with_mentors):
+        # First write all matched groups
+        for i, (group, group_mentors) in enumerate(groups_with_mentors):
             writer.writerow([f'Group {i+1}'])
             for student in group:
                 writer.writerow(['', 'Mentee', student.name, student.email, student.year, student.school])
-            for mentor in mentors:
-                writer.writerow(['', 'Mentor', mentor.name, mentor.email, mentor.year, mentor.school])
+            if group_mentors:
+                for mentor in group_mentors:
+                    writer.writerow(['', 'Mentor', mentor.name, mentor.email, mentor.year, mentor.school])
+            else:
+                writer.writerow(['', 'Note', 'No mentor assigned - on waitlist'])
             writer.writerow([])
+        
+        # Then write unmatched students at the bottom
+        if unmatched_students:
+            writer.writerow(['Unmatched Students'])
+            for student in unmatched_students:
+                writer.writerow(['', 'Unmatched', student.name, student.email, student.year, student.school])
+    
+    # Print statistics
+    complete_groups = sum(1 for g, m in groups_with_mentors if len(g) == 3 and m)
+    students_in_complete_groups = complete_groups * 3
+    total_students = len(mentees)
+    
+    print("\nMatching Statistics:")
+    print(f"Total mentees: {total_students}")
+    print(f"Students in complete groups (3 mentees + mentor): {students_in_complete_groups} ({students_in_complete_groups/total_students:.1%})")
+    print(f"Number of mentors: {len(mentors)}")
+    print(f"Number of complete groups: {complete_groups}")
+    print(f"Number of unmatched students: {len(unmatched_students)} ({len(unmatched_students)/total_students:.1%})")
 
 
 
